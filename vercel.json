@@ -1,6 +1,9 @@
 {
+  "framework": null,
+  "buildCommand": "",
+  "installCommand": "",
   "functions": {
-    "api/stats.js": { "maxDuration": 15 }
+    "api/stats.mjs": { "maxDuration": 15 }
   },
   "headers": [
     {

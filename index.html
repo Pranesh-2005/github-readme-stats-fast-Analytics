@@ -102,11 +102,12 @@ main {
 
 /* KPIs: plain numbers, no boxes inside boxes */
 .kpis {
-  grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
 }
 .kpi { padding: 16px 20px; border-left: 1px solid var(--line); }
-.kpi:first-child { border-left: 0; }
+.kpi:nth-child(4n + 1) { border-left: 0; }
+.kpi:nth-child(n + 5) { border-top: 1px solid var(--line); }
 .kpi .label { color: var(--text-2); font-size: 13px; }
 .kpi .value { font: 500 26px/1.2 var(--mono); margin-top: 4px; font-variant-numeric: tabular-nums; }
 .kpi .sub { color: var(--text-2); font-size: 12px; margin-top: 2px; }
@@ -163,10 +164,13 @@ a:hover { text-decoration-color: var(--series); }
 .note { max-width: 1280px; margin: 0 auto; padding: 0 24px 32px; color: var(--text-2); font-size: 13px; }
 
 @media (max-width: 860px) {
-  main { grid-template-columns: 1fr; padding: 12px 16px 20px; }
+  main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px 20px; }
   .bar { padding: 16px 16px 4px; }
   .status, .note { padding-left: 16px; padding-right: 16px; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi { border-left: 0; border-top: 1px solid var(--line); }
+  .kpi:nth-child(-n + 2) { border-top: 0; }
+  .kpi:nth-child(2n) { border-left: 1px solid var(--line); }
   .chart { height: 200px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -175,7 +179,7 @@ a:hover { text-decoration-color: var(--series); }
 }
 
 /* wide tables scroll inside their panel instead of widening the page */
-#cards, #users, #daily, #apps { overflow-x: auto; }
+#usage, #cards, #users, #daily, #apps { overflow-x: auto; }
 td.num, .cellbar .num, td:has(> time) { white-space: nowrap; }
 @media (max-width: 860px) {
   .cellbar i { max-width: 64px; }
@@ -230,6 +234,11 @@ td.num, .cellbar .num, td:has(> time) { white-space: nowrap; }
 
   <main>
     <section class="kpis" id="kpis" aria-label="Key numbers"></section>
+
+    <section class="panel wide">
+      <h2>Requests and CDN cache <span class="unit">Vercel, accounts serving the main URL, UTC days</span></h2>
+      <div id="usage"></div>
+    </section>
 
     <section class="panel wide">
       <h2>Renders per hour</h2>
@@ -437,13 +446,14 @@ function failed(el, key) {
 
 function skeleton() {
   $("#kpis").innerHTML = Array.from({ length: 6 }, () => `<div class="kpi"><div class="label">&nbsp;</div><div class="skeleton"></div></div>`).join("");
-  for (const id of ["series", "hours", "daily", "cards", "users", "edges", "returning", "apps"]) {
+  for (const id of ["usage", "series", "hours", "daily", "cards", "users", "edges", "returning", "apps"]) {
     $(`#${id}`).innerHTML = `<div class="skeleton"></div>`;
   }
 }
 
 function render() {
   renderKpis();
+  renderUsage();
   renderSeries();
   renderHours();
   renderDaily();
@@ -466,11 +476,45 @@ function renderKpis() {
     ["Card URLs", num(k.urls), "distinct"],
     ["Median render", ms(k.p50), `p95 ${ms(k.p95)}`],
     ["Error cards", pct(k.errors, k.renders), `${num(k.errors)} renders`, errRate > 0.05],
-    ["Warm-instance hits", pct(k.warm, k.renders), "served from in-process cache"],
   ];
+  if (!usageTotals()) tiles.push(["Warm-instance hits", pct(k.warm, k.renders), "served from in-process cache"]);
+  const u = usageTotals();
+  if (u) {
+    tiles.unshift(
+      ["Requests", num(u.total), `all CDN requests, ${u.span} UTC`],
+      ["CDN hit rate", pct(u.hits, u.total), `${num(u.hits)} cache hits`],
+      ["Misses without a run", num(u.misses - u.fnOk), "likely trailing-slash redirects"],
+    );
+  }
   el.innerHTML = tiles
     .map(([label, value, sub, bad]) => `<div class="kpi"><div class="label">${label}</div><div class="value${bad ? " bad" : ""}">${value}</div><div class="sub">${sub}</div></div>`)
     .join("");
+}
+
+function usageTotals() {
+  const r = last?.results?.usage?.rows;
+  if (!r?.length) return null;
+  const t = r.reduce((t, d) => ({ total: t.total + d.total, hits: t.hits + d.hits, misses: t.misses + d.misses, fnOk: t.fnOk + d.fnOk }), { total: 0, hits: 0, misses: 0, fnOk: 0 });
+  const day = (s) => dayFmt.format(new Date(s + "T00:00:00Z"));
+  t.span = r.length === 1 ? day(r[0].date) : `${day(r[0].date)} to ${day(r.at(-1).date)}`;
+  return t;
+}
+
+function renderUsage() {
+  const el = $("#usage");
+  const u = last?.results?.usage;
+  if (!u || u.disabled) { el.innerHTML = `<p class="empty">Set VERCEL_TOKENS (label:token, labels like acc3) to show CDN hits and total requests.</p>`; return; }
+  if (u.error) { el.innerHTML = `<p class="qerr">Vercel usage failed: ${esc(u.error)}</p>`; return; }
+  const warn = u.errors?.length ? `<p class="qerr">${u.errors.map(esc).join("<br>")}</p>` : "";
+  if (!u.rows?.length) { el.innerHTML = `${warn}<p class="empty">No Vercel usage in this range.</p>`; return; }
+  const today = new Date().toISOString().slice(0, 10);
+  el.innerHTML = `${warn}<table><thead><tr><th>Day (UTC)</th><th class="num">Requests</th><th class="num">Cache hits</th><th class="num">Hit rate</th><th class="num">Misses</th><th class="num">Function runs</th><th class="num">Misses without a run</th><th class="num">Errors</th><th class="num">Sent</th></tr></thead><tbody>${u.rows
+    .map((d) => {
+      const partial = d.date === today ? `<span class="partial">so far</span>` : "";
+      const fails = d.fnErr + d.fnTimeout;
+      return `<tr><td>${dayFmt.format(new Date(d.date + "T00:00:00Z"))}${partial}</td><td class="num">${num(d.total)}</td><td class="num">${num(d.hits)}</td><td class="num">${pct(d.hits, d.total)}</td><td class="num">${num(d.misses)}</td><td class="num">${num(d.fnOk)}</td><td class="num">${num(d.misses - d.fnOk)}</td><td class="num"><span class="${fails ? "bad" : ""}">${num(fails)}</span></td><td class="num">${(d.outBytes / 1e6).toFixed(1)} MB</td></tr>`;
+    })
+    .join("")}</tbody></table><p class="unit" style="margin:10px 0 0">Accounts counted: ${u.accounts.map((a) => esc(a.label)).join(", ")}. Vercel totals are account-wide.</p>`;
 }
 
 /* ---------- SVG helpers ---------- */

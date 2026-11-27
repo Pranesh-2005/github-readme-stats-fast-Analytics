@@ -15,6 +15,10 @@ Set these env vars on the project:
 - `AXIOM_DATASET` `ghstats`
 - `EXCLUDE_USERS` comma list of test users to hide
 - `DASH_KEY` long random string. Required: without it the API refuses every call.
+- `VERCEL_TOKENS` optional, `acc1:<token>,acc3:<token>` (labels = ANALYTICS_APP of the stats app).
+  Adds total requests and CDN cache hits from Vercel's usage API. Only accounts that served the
+  main URL in the range are counted. These are full-access Vercel tokens: create dedicated ones
+  with an expiry, and mark them Sensitive.
 
 `server.mjs`, `.env`, `server.log` and this README are excluded by `.vercelignore`.
 

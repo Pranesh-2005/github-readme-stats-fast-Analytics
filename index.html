@@ -113,6 +113,21 @@ main {
 .kpi .sub { color: var(--text-2); font-size: 12px; margin-top: 2px; }
 .kpi .value.bad { color: var(--critical); }
 
+/* Requests chart: categorical slots 1-3, validated light + dark */
+:root { --c-hit: #257de0; --c-run: #00b894; --c-norun: #f47230; }
+@media (prefers-color-scheme: dark) { :root { --c-hit: #338ced; --c-run: #00a888; --c-norun: #e76624; } }
+.seg-hit { fill: var(--c-hit); }
+.seg-run { fill: var(--c-run); }
+.seg-norun { fill: var(--c-norun); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: -4px 0 10px; font-size: 13px; color: var(--text-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.sw-hit { background: var(--c-hit); } .sw-run { background: var(--c-run); } .sw-norun { background: var(--c-norun); }
+.tableview { margin-top: 12px; }
+.tableview summary { cursor: pointer; color: var(--text-2); font-size: 13px; padding: 4px 0; }
+.tableview summary:hover { color: var(--text); }
+.tableview[open] summary { margin-bottom: 8px; }
+
 /* Charts */
 .chart { position: relative; height: 240px; }
 .chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -299,7 +314,8 @@ const store = {
 
 const RANGES = ["24h", "3d", "7d", "30d"];
 const TTLS = ["300", "900", "3600", "21600"];
-let range = RANGES.includes(store.get("range", "24h")) ? store.get("range", "24h") : "24h";
+const urlRange = new URLSearchParams(location.search).get("range"); // bookmarkable: ?range=7d
+let range = RANGES.includes(urlRange) ? urlRange : RANGES.includes(store.get("range", "24h")) ? store.get("range", "24h") : "24h";
 let ttl = Number(TTLS.includes(store.get("ttl", "900")) ? store.get("ttl", "900") : "900");
 let last = null;
 let timer = null;
@@ -483,7 +499,7 @@ function renderKpis() {
     tiles.unshift(
       ["Requests", num(u.total), `all CDN requests, ${u.span} UTC`],
       ["CDN hit rate", pct(u.hits, u.total), `${num(u.hits)} cache hits`],
-      ["Misses without a run", num(u.misses - u.fnOk), "likely trailing-slash redirects"],
+      ["Misses without a run", num(u.misses - u.fnOk), "redirects and other non-function misses"],
     );
   }
   el.innerHTML = tiles
@@ -508,13 +524,64 @@ function renderUsage() {
   const warn = u.errors?.length ? `<p class="qerr">${u.errors.map(esc).join("<br>")}</p>` : "";
   if (!u.rows?.length) { el.innerHTML = `${warn}<p class="empty">No Vercel usage in this range.</p>`; return; }
   const today = new Date().toISOString().slice(0, 10);
-  el.innerHTML = `${warn}<table><thead><tr><th>Day (UTC)</th><th class="num">Requests</th><th class="num">Cache hits</th><th class="num">Hit rate</th><th class="num">Misses</th><th class="num">Function runs</th><th class="num">Misses without a run</th><th class="num">Errors</th><th class="num">Sent</th></tr></thead><tbody>${u.rows
+  const table = `<table><thead><tr><th>Day (UTC)</th><th class="num">Requests</th><th class="num">Cache hits</th><th class="num">Hit rate</th><th class="num">Misses</th><th class="num">Function runs</th><th class="num">Misses without a run</th><th class="num">Errors</th><th class="num">Sent</th></tr></thead><tbody>${u.rows
     .map((d) => {
       const partial = d.date === today ? `<span class="partial">so far</span>` : "";
       const fails = d.fnErr + d.fnTimeout;
       return `<tr><td>${dayFmt.format(new Date(d.date + "T00:00:00Z"))}${partial}</td><td class="num">${num(d.total)}</td><td class="num">${num(d.hits)}</td><td class="num">${pct(d.hits, d.total)}</td><td class="num">${num(d.misses)}</td><td class="num">${num(d.fnOk)}</td><td class="num">${num(d.misses - d.fnOk)}</td><td class="num"><span class="${fails ? "bad" : ""}">${num(fails)}</span></td><td class="num">${(d.outBytes / 1e6).toFixed(1)} MB</td></tr>`;
     })
-    .join("")}</tbody></table><p class="unit" style="margin:10px 0 0">Accounts counted: ${u.accounts.map((a) => esc(a.label)).join(", ")}. Vercel totals are account-wide.</p>`;
+    .join("")}</tbody></table>`;
+  el.innerHTML = `${warn}
+    <div class="legend" aria-hidden="true">
+      <span><i class="sw sw-hit"></i>Cache hits</span>
+      <span><i class="sw sw-run"></i>Function runs</span>
+      <span><i class="sw sw-norun"></i>Misses without a run</span>
+    </div>
+    <div class="chart" id="usageChart"></div>
+    <details class="tableview"><summary>Show table</summary>${table}</details>
+    <p class="unit" style="margin:10px 0 0">Accounts counted: ${u.accounts.map((a) => esc(a.label)).join(", ")}. Vercel totals are account-wide.</p>`;
+  renderUsageChart($("#usageChart"), u.rows);
+}
+
+// Stacked bars per day: hits + function runs + misses without a run = all requests.
+function renderUsageChart(el, rows) {
+  el.innerHTML = "";
+  const w = el.clientWidth, h = el.clientHeight;
+  const m = { l: 60, r: 8, t: 10, b: 26 };
+  const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, role: "img", "aria-label": "Requests per day, split into cache hits, function runs and misses without a run" }, el);
+  const max = niceMax(Math.max(...rows.map((d) => d.total)));
+  yAxis(svg, h, m, w, max);
+  const plotH = h - m.t - m.b;
+  const band = (w - m.l - m.r) / rows.length;
+  const bw = Math.max(3, Math.min(40, band - 4));
+  const every = Math.max(1, Math.ceil(rows.length / Math.max(2, Math.floor((w - m.l) / 72))));
+  const g = svgEl("g", { class: "axis" }, svg);
+  const label = (d) => dayFmt.format(new Date(d.date + "T00:00:00Z"));
+  rows.forEach((d, i) => {
+    const x0 = m.l + i * band + (band - bw) / 2;
+    const parts = [["hit", d.hits], ["run", d.fnOk], ["norun", Math.max(0, d.misses - d.fnOk)]].filter((p) => p[1] > 0);
+    let base = h - m.b;
+    parts.forEach(([cls, v], k) => {
+      const gap = k ? 2 : 0; // 2px surface gap between stacked segments
+      const top = base - (v / max) * plotH;
+      const bottom = base - gap;
+      if (bottom - top < 0.5) { base = top; return; }
+      const r = k === parts.length - 1 ? Math.min(4, bw / 2, bottom - top) : 0; // round only the data end
+      svgEl("path", {
+        class: `seg seg-${cls}`,
+        d: `M${x0},${bottom}V${top + r}Q${x0},${top} ${x0 + r},${top}H${x0 + bw - r}Q${x0 + bw},${top} ${x0 + bw},${top + r}V${bottom}Z`,
+      }, svg);
+      base = top;
+    });
+    const hit = svgEl("rect", { class: "hit", x: m.l + i * band, y: m.t, width: band, height: plotH }, svg);
+    hit.addEventListener("pointermove", (ev) =>
+      tip(`${label(d)}<br>${num(d.total)} requests<br>${num(d.hits)} cache hits (${pct(d.hits, d.total)})<br>${num(d.fnOk)} function runs<br>${num(d.misses - d.fnOk)} misses without a run`, ev));
+    hit.addEventListener("pointerleave", () => tip(null));
+    if (i % every === 0) {
+      const t = svgEl("text", { x: x0 + bw / 2, y: h - 6, "text-anchor": "middle" }, g);
+      t.textContent = label(d);
+    }
+  });
 }
 
 /* ---------- SVG helpers ---------- */
@@ -698,7 +765,7 @@ function renderApps() {
 let resizeFrame;
 new ResizeObserver(() => {
   cancelAnimationFrame(resizeFrame);
-  resizeFrame = requestAnimationFrame(() => { if (last) { renderSeries(); renderHours(); } });
+  resizeFrame = requestAnimationFrame(() => { if (last) { renderSeries(); renderHours(); if ($("#usageChart")) renderUsageChart($("#usageChart"), last.results.usage.rows); } });
 }).observe($("#series"));
 
 load(false);
